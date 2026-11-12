@@ -14,6 +14,7 @@ Security design:
 """
 
 import json
+import math
 import time
 import os
 import secrets
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from agent.core.keystore import AgentKeystore, SecureKey, get_or_create_key
+from agent.core import signing
 
 DAEMON_WALLET_DIR = Path.home() / ".agora" / "daemon"
 POLICY_FILE = DAEMON_WALLET_DIR / "policy.json"
@@ -94,8 +96,7 @@ class DaemonWallet:
         """Load or create daemon-ai's keypair. Returns public key hex."""
         self._key = get_or_create_key(self.agent_name)
 
-        import hashlib
-        self.pub_key_hex = "03" + hashlib.sha256(self._key.bytes).hexdigest()[:64]
+        self.pub_key_hex = signing.agent_id_from_private_key(self._key.bytes)
 
         # Load persisted balance
         balance_file = DAEMON_WALLET_DIR / "balance.json"
@@ -105,6 +106,12 @@ class DaemonWallet:
             self._earned_total = data.get("earned_total", 0.0)
 
         return self.pub_key_hex
+
+    def sign(self, data: bytes) -> str:
+        """Ed25519-sign data with the daemon's key. Verifiable against pub_key_hex."""
+        if not self._key:
+            raise RuntimeError("Wallet not initialized — key not loaded")
+        return signing.sign(self._key.bytes, data)
 
     def _save_balance(self):
         balance_file = DAEMON_WALLET_DIR / "balance.json"
@@ -140,6 +147,14 @@ class DaemonWallet:
         """
         if self.policy.frozen:
             return False, "wallet frozen by user"
+
+        # A spend must be a real, positive number. Zero and negative amounts pass
+        # every "exceeds limit" comparison below and a negative one would raise the
+        # balance when subtracted; NaN compares False against everything; bool is
+        # an int in Python.
+        if (isinstance(amount_nom, bool) or not isinstance(amount_nom, (int, float))
+                or not math.isfinite(amount_nom) or amount_nom <= 0):
+            return False, f"invalid amount: {amount_nom!r} (must be a finite number > 0)"
 
         if amount_nom > self._balance_nom:
             return False, f"insufficient balance: {self._balance_nom:.2f} NOM < {amount_nom:.2f} NOM"

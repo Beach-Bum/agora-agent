@@ -102,15 +102,15 @@ enum EscrowStatus {
 ### Entry points
 
 **`create_escrow(buyer_id, seller_id, amount, delivery_hash_commitment, timeout_ms, slash_bps)`**
-- Locks `amount` NOM from buyer's LSSA account
+- Moves `amount` plus a 10% dispute bond from the buyer's deposited balance into the escrow-held account; fails with `InsufficientFunds` if the buyer has not deposited enough (`deposit(agent_id, amount)`)
 - `delivery_hash_commitment` must start with `sha256:`
 - `slash_bps` ≤ 10,000 (100%)
 - Emits: `EscrowCreated { escrow_id, buyer_id, seller_id, amount, timeout_ms, block }`
 
 **`notify_delivery(caller_id, escrow_id, actual_output_hash, logos_storage_cid)`**
 - Only callable by seller
-- Verifies `actual_output_hash == delivery_hash_commitment`
-- Sets status to `Delivered`
+- Returns `Ok(DeliveryOutcome::Delivered)` and sets status to `Delivered` when `actual_output_hash == delivery_hash_commitment`
+- Returns `Ok(DeliveryOutcome::Disputed)` and sets status to `Disputed` when it does not match. This is a successful call, not an error, so the dispute is committed; funds stay held until `resolve_dispute`
 - Must be called before `timeout_ms`
 
 **`release(caller_id, escrow_id, verified_output_hash)`**

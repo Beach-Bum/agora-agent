@@ -20,6 +20,8 @@ from typing import Callable, Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
 
+from agent.core import signing
+
 # ── Security constants ────────────────────────────────────────────
 
 # FIX-6: Messages older than this are rejected as potential replays
@@ -106,6 +108,67 @@ class RateLimiter:
         return True
 
 
+# ── Signatures ────────────────────────────────────────────────────
+
+# Marketplace message types and the field that names their signer. The signer's
+# agent id is its Ed25519 public key (see agent/core/signing.py), so the message
+# carries everything needed to check it.
+SIGNER_FIELD_BY_TYPE = {
+    "capability_manifest": "agentId",
+    "buy_intent":          "buyerId",
+    "offer":               "sellerId",
+    "delivery":            "sellerId",
+    "negotiation":         "fromId",
+}
+
+
+def canonical_bytes(msg: dict) -> bytes:
+    """
+    The exact bytes a message signature covers: the message without its `sig`
+    field, as JSON with sorted keys and no whitespace. Every other field,
+    including type, ts, nonce and the signer's id, is covered.
+    """
+    unsigned = {k: v for k, v in msg.items() if k != "sig"}
+    return json.dumps(unsigned, sort_keys=True, separators=(',', ':')).encode()
+
+
+def sign_message(msg: dict, sign_fn: Callable) -> dict:
+    """Attach `sig` to a message. sign_fn takes bytes and returns a hex signature."""
+    msg["sig"] = sign_fn(canonical_bytes(msg))
+    return msg
+
+
+def verify_message(msg: dict) -> tuple[bool, str]:
+    """
+    Check that a marketplace message was signed by the agent it claims to be from.
+
+    Returns (valid: bool, reason: str). Fails for a type that is not a signed
+    marketplace type, a missing signer or signature, a signature made with a
+    different key, or any field changed after signing.
+    """
+    signer_field = SIGNER_FIELD_BY_TYPE.get(msg.get("type"))
+    if signer_field is None:
+        return False, f"not a signed message type: {msg.get('type')!r}"
+
+    signer = msg.get(signer_field)
+    if not isinstance(signer, str) or not signer:
+        return False, f"missing signer field: {signer_field}"
+
+    sig = msg.get("sig")
+    if not isinstance(sig, str) or not sig:
+        return False, "missing signature"
+
+    try:
+        payload = canonical_bytes(msg)
+    except (TypeError, ValueError):
+        return False, "message is not canonical JSON"
+
+    if not signing.verify(signer, payload, sig):
+        return False, f"invalid signature for {signer[:16]}"
+
+    return True, "ok"
+
+
 # ── Message validation ────────────────────────────────────────────
 
 def validate_incoming_message(msg: dict, nonce_cache: NonceCache,
@@ -114,15 +177,23 @@ def validate_incoming_message(msg: dict, nonce_cache: NonceCache,
     """
     Validate an incoming Logos Messaging message.
 
-    Checks:
-    - Required fields present
+    Checks, in this order:
+    - Required fields present and well-typed
     - Timestamp within validity window (FIX-6)
+    - Signature valid for the claimed sender (marketplace message types)
     - Nonce not seen before (FIX-6 replay prevention)
     - Sender not rate-limited (FIX-9)
+
+    The signature is checked before the nonce is recorded and before the rate
+    limiter is charged, so a forged message can neither burn a real sender's
+    nonce nor use up their rate limit.
 
     Returns (valid: bool, reason: str).
     """
     now_ms = int(time.time() * 1000)
+
+    if not isinstance(msg, dict):
+        return False, "message is not an object"
 
     # Required fields
     for field in ("version", "type", "ts", "nonce"):
@@ -130,22 +201,38 @@ def validate_incoming_message(msg: dict, nonce_cache: NonceCache,
             return False, f"missing field: {field}"
 
     # FIX-6: Timestamp check
-    msg_ts = msg.get("ts", 0)
+    msg_ts = msg["ts"]
+    if isinstance(msg_ts, bool) or not isinstance(msg_ts, int):
+        return False, "ts must be an integer (unix ms)"
     age_ms = now_ms - msg_ts
     if age_ms > MESSAGE_VALIDITY_WINDOW_MS:
         return False, f"message too old: {age_ms}ms"
     if age_ms < -30_000:  # Allow 30s clock skew
         return False, "message from the future"
 
-    # FIX-6: Nonce replay check
-    nonce = msg.get("nonce", "")
-    if not nonce or len(nonce) < 16:
+    nonce = msg["nonce"]
+    if not isinstance(nonce, str) or len(nonce) < 16:
         return False, "missing or short nonce"
+
+    # Authenticate the sender before touching any per-sender state.
+    signer_field = SIGNER_FIELD_BY_TYPE.get(msg["type"]) if isinstance(msg["type"], str) else None
+    if signer_field is not None:
+        valid, reason = verify_message(msg)
+        if not valid:
+            return False, reason
+        sender = msg[signer_field]
+    else:
+        # Other message types (direct messages, topic messages, agent cards)
+        # are not signed yet: their sender is unauthenticated.
+        sender = msg.get("agentId") or msg.get("buyerId") or msg.get("sellerId") or ""
+        if not isinstance(sender, str):
+            return False, "sender id must be a string"
+
+    # FIX-6: Nonce replay check
     if not nonce_cache.check_and_record(nonce):
         return False, "replay attack: nonce already seen"
 
     # FIX-9: Rate limiting
-    sender = msg.get("agentId") or msg.get("buyerId") or msg.get("sellerId") or ""
     if sender and not rate_limiter.allow(sender):
         return False, f"rate limit exceeded for {sender[:16]}"
 
@@ -185,9 +272,7 @@ class CapabilityManifest:
             "ts":              int(time.time() * 1000),
             "nonce":           secrets.token_hex(16),  # FIX-6: fresh nonce per message
         }
-        canonical = json.dumps(data, sort_keys=True, separators=(',', ':'))
-        data["sig"] = sign_fn(canonical.encode())
-        return data
+        return sign_message(data, sign_fn)
 
 
 @dataclass
@@ -218,9 +303,7 @@ class BuyIntent:
             "ts":               int(time.time() * 1000),
             "nonce":            secrets.token_hex(16),  # FIX-6
         }
-        canonical = json.dumps(data, sort_keys=True, separators=(',', ':'))
-        data["sig"] = sign_fn(canonical.encode())
-        return data
+        return sign_message(data, sign_fn)
 
 
 @dataclass
@@ -256,9 +339,7 @@ class Offer:
             "ts":    int(time.time() * 1000),
             "nonce": secrets.token_hex(16),  # FIX-6
         }
-        canonical = json.dumps(data, sort_keys=True, separators=(',', ':'))
-        data["sig"] = sign_fn(canonical.encode())
-        return data
+        return sign_message(data, sign_fn)
 
 
 @dataclass
@@ -281,9 +362,7 @@ class DeliveryNotification:
             "ts":         int(time.time() * 1000),
             "nonce":      secrets.token_hex(16),  # FIX-6
         }
-        canonical = json.dumps(data, sort_keys=True, separators=(',', ':'))
-        data["sig"] = sign_fn(canonical.encode())
-        return data
+        return sign_message(data, sign_fn)
 
 
 # ── Logos Messaging client ────────────────────────────────────────
@@ -492,8 +571,7 @@ class MarketplaceMessaging:
             "ts":        int(time.time() * 1000),
             "nonce":     secrets.token_hex(16),  # FIX-6
         }
-        canonical = json.dumps(msg, sort_keys=True, separators=(',', ':'))
-        msg["sig"] = self.sign_fn(canonical.encode())
+        sign_message(msg, self.sign_fn)
         return await self.client.publish(topic_negotiate(session_id), msg)
 
     def on_intent(self, handler: Callable):

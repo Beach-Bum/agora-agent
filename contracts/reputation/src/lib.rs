@@ -146,8 +146,8 @@ impl ReputationRegistry {
         // Buyer gets a small reputation boost for completing a trade honestly
         let buyer_new_score = self.update_buyer_participation(&buyer_id, &attestation, block)?;
 
-        self.update_sybil_profile(&att.seller_id, &att.buyer_id);
-        self.update_sybil_profile(&att.buyer_id, &att.seller_id);
+        self.update_sybil_profile(&seller_id, &buyer_id);
+        self.update_sybil_profile(&buyer_id, &seller_id);
         self.attestations.push(attestation);
 
         self.events.push(Event::ReputationUpdated {
