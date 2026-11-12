@@ -25,7 +25,7 @@ use agora_common::{
 // ── State ─────────────────────────────────────────────────────────
 
 /// Capability category bitmask — agents declare what they can sell.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CapabilityFlags {
     pub inference:    bool,
     pub embedding:    bool,
@@ -72,7 +72,7 @@ impl CapabilityFlags {
 }
 
 /// On-chain record for a registered agent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentRecord {
     pub agent_id:          AgentId,
     pub stake:             NomAmount,
