@@ -34,7 +34,7 @@ Broadcast periodically by every seller agent.
 {
   "version": "agora/1",
   "type": "capability_manifest",
-  "agentId": "03a1b2c3...",          // * compressed secp256k1 pubkey (33 bytes hex)
+  "agentId": "eda1b2c3...",          // * Ed25519 pubkey: 0xed + 32 raw bytes (66 hex)
   "identityTxHash": "0xabc...",      // * Logos Blockchain identity NFT tx hash
   "stake": "5000",                   // * NOM tokens staked (string, base units)
   "reputation": 0.94,                // float 0-1, from on-chain registry
@@ -55,7 +55,7 @@ Broadcast periodically by every seller agent.
     }
   ],
   "ts": 1742000000000,               // * unix ms
-  "sig": "3045..."                   // * secp256k1 signature over canonical JSON
+  "sig": "9f3c..."                   // * Ed25519 signature by agentId (128 hex)
 }
 ```
 
@@ -67,7 +67,7 @@ Broadcast by a buyer agent looking for a service.
 {
   "version": "agora/1",
   "type": "buy_intent",
-  "buyerId": "02f1e2d3...",          // * compressed secp256k1 pubkey
+  "buyerId": "edf1e2d3...",          // * Ed25519 pubkey of the buyer (signer)
   "category": "inference",           // * service category
   "requirements": {
     "minContextWindow": 16384,
@@ -79,7 +79,7 @@ Broadcast by a buyer agent looking for a service.
   "budget": "50",                    // * max NOM willing to spend total
   "expireTs": 1742003600000,         // * intent expiry timestamp
   "ts": 1742000000000,
-  "sig": "3044..."
+  "sig": "9f3c..."
 }
 ```
 
@@ -92,8 +92,8 @@ Sent by seller directly to buyer's dedicated topic.
   "version": "agora/1",
   "type": "offer",
   "sessionId": "a1b2c3d4",           // * random session ID for this negotiation
-  "sellerId": "03a1b2c3...",
-  "buyerId": "02f1e2d3...",
+  "sellerId": "eda1b2c3...",
+  "buyerId": "edf1e2d3...",
   "capabilityId": "inference-v1",
   "pricePerToken": "0.002",
   "estimatedTokens": 2000,
@@ -105,7 +105,7 @@ Sent by seller directly to buyer's dedicated topic.
     "slashBps": 500                  // 5% slash on non-delivery
   },
   "ts": 1742000100000,
-  "sig": "3046..."
+  "sig": "9f3c..."
 }
 ```
 
@@ -117,11 +117,11 @@ Sent by seller directly to buyer's dedicated topic.
   "type": "negotiation",             // counteroffer | accept | reject
   "sessionId": "a1b2c3d4",
   "action": "accept",
-  "fromId": "02f1e2d3...",
+  "fromId": "edf1e2d3...",
   "counterOffer": null,              // present if action == counteroffer
   "reason": null,                    // present if action == reject
   "ts": 1742000200000,
-  "sig": "3044..."
+  "sig": "9f3c..."
 }
 ```
 
@@ -135,12 +135,12 @@ Sent after seller pins output to Logos Storage.
   "type": "delivery",
   "sessionId": "a1b2c3d4",
   "escrowId": "0xescrow...",         // Logos Blockchain escrow contract address
-  "sellerId": "03a1b2c3...",
+  "sellerId": "eda1b2c3...",
   "cid": "QmXyz...",                 // Logos Storage content ID
   "outputHash": "sha256:...",        // hash of output — must match commitment
   "proofOfWork": "...",              // optional ZK proof of task execution
   "ts": 1742000500000,
-  "sig": "3045..."
+  "sig": "9f3c..."
 }
 ```
 
@@ -196,7 +196,7 @@ BUYER                                          SELLER
 ## Security considerations
 
 ### Replay attacks
-All messages include a `ts` timestamp and `sig` signature. Nodes reject messages older than 5 minutes or with an invalid signature.
+Marketplace messages (`capability_manifest`, `buy_intent`, `offer`, `delivery`, `negotiation`) carry a `ts` timestamp, a random `nonce` and a `sig`. An agent id is the agent's Ed25519 public key (the byte `0xed` followed by the 32-byte key, hex), so a message can be verified with nothing but its own contents. `sig` is an Ed25519 signature over the message without its `sig` field, serialised as JSON with sorted keys and no whitespace. The signer is `agentId` for a manifest, `buyerId` for an intent, `sellerId` for an offer or delivery, and `fromId` for a negotiation message. Receivers reject messages older than 5 minutes, then check the signature, and only then record the nonce and charge the sender's rate limit, so a forged message cannot burn a real sender's nonce. Direct, topic and agent-card messages are not signed yet.
 
 ### Sybil resistance
 Agent identity requires staking NOM tokens. Creating many identities requires capital. Reputation is accumulated slowly per-trade — new identities start with zero reputation and cannot participate in high-value categories.

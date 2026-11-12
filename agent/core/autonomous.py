@@ -96,9 +96,7 @@ class AutonomousDaemon:
         self.intents_evaluated = 0
 
     def _sign(self, data: bytes) -> str:
-        import hmac
-        sig = hmac.new(self.wallet._key.bytes, data, hashlib.sha256).hexdigest()
-        return "3045" + sig
+        return self.wallet.sign(data)
 
     def _emit(self, event: str, level: str = "info", **data):
         entry = {"event": event, "level": level, "ts": time.time(), **data}

@@ -25,6 +25,7 @@ from agent.logos.blockchain import LogosBlockchainClient, AgentIdentity
 from agent.logos.storage import LogosStorageClient
 from agent.daemon.llm import DaemonLLM, AgentReasoner
 from agent.core.keystore import AgentKeystore, SecureKey, get_or_create_key  # FIX-5
+from agent.core import signing
 
 
 @dataclass
@@ -59,12 +60,10 @@ class AgoraAgent:
         self._pending_offers: list[dict] = []
 
     def _sign(self, data: bytes) -> str:
-        """Sign data — uses secure key bytes in memory, never exposes hex to logs."""
-        import hmac
+        """Ed25519-sign data with the key held in memory. Verifiable against pub_key_hex."""
         if not self._secure_key:
             raise RuntimeError("Agent not started — key not loaded")
-        sig = hmac.new(self._secure_key.bytes, data, hashlib.sha256).hexdigest()
-        return "3045" + sig
+        return signing.sign(self._secure_key.bytes, data)
 
     def _priv_key_hex(self) -> str:
         """Return private key hex for blockchain calls — only called internally."""
@@ -81,7 +80,7 @@ class AgoraAgent:
 
         # FIX-5: Load key securely from OS keychain or encrypted file
         self._secure_key = get_or_create_key(self.config.agent_name)
-        self.pub_key_hex = "03" + hashlib.sha256(self._secure_key.bytes).hexdigest()[:64]
+        self.pub_key_hex = signing.agent_id_from_private_key(self._secure_key.bytes)
         print(f"[Agent] Key loaded for {self.config.agent_name} — pubkey {self.pub_key_hex[:20]}…")
 
         await self.messaging.start()
